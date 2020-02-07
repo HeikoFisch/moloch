@@ -42,6 +42,8 @@ const _1e18 = new BN('1000000000000000000') // 1e18
 const _10e18 = new BN('10000000000000000000') // 10e18
 const _100e18 = new BN('100000000000000000000') // 10e18
 
+const MAX_GAS = 9000000
+
 async function blockTime () {
   const block = await web3.eth.getBlock('latest')
   return block.timestamp
@@ -805,6 +807,141 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
         'whitelist epsilon!',
         { from: summoner }
       ).should.be.rejectedWith(revertMessages.submitWhitelistProposalMaximumNumberOfTokensReached)
+    })
+  })
+
+  describe.only('maximum token count', async function() { // need `function` in order to have `this`
+    this.timeout(999999999); // disable timeout, because this takes really long
+    // In case of a timeout in the "after-each", try 99999999.
+    // Note: We need to upgrade to Istanbul.
+    it('gas used during ragequit', async () => {
+      let tokens = []
+      let lastProposal, proposalCount = 0
+
+      await fundAndApproveToMoloch({
+        token: tokenAlpha,
+        to: summoner,
+        from: creator,
+        value: MAX_TOKEN_COUNT * 2 * deploymentConfig.PROPOSAL_DEPOSIT
+      })
+
+      for (let i = 0; i < MAX_TOKEN_COUNT; i++) {
+        let token
+
+        if (i == 0) {
+          token = tokenAlpha
+
+        } else if (i == 1) {
+          token = tokenBeta
+
+        } else {
+          token = await Token.new(deploymentConfig.TOKEN_SUPPLY, { from: creator })
+
+          await moloch.submitWhitelistProposal(
+            token.address,
+            'whitelist token!',
+            { from: summoner }
+          )
+          lastProposal = proposalCount++
+
+          await moloch.sponsorProposal(lastProposal, { from: summoner })
+          await moveForwardPeriods(1)
+          await moloch.submitVote(lastProposal, yes, { from: summoner })
+          await moveForwardPeriods(deploymentConfig.VOTING_DURATON_IN_PERIODS)
+          await moveForwardPeriods(deploymentConfig.GRACE_DURATON_IN_PERIODS)
+          await moloch.processWhitelistProposal(lastProposal, { from: summoner })
+        }
+
+        tokens.push(token)
+
+        const lastTokenAddress = await moloch.approvedTokens(i)
+        assert.equal(lastTokenAddress, token.address)
+
+        await fundAndApproveToMoloch({
+          token: token,
+          to: applicant1,
+          from: creator,
+          value: 2
+        })
+
+        await moloch.submitProposal(
+          applicant1,
+          0, // shares requested
+          0, // loot requested
+          2, // tribute offered
+          token.address, // tribute token
+          0, // payment requested
+          tokenAlpha.address, // payment token
+          'all hail moloch', // details
+          { from: applicant1 }
+        )
+        lastProposal = proposalCount++
+
+        await moloch.sponsorProposal(lastProposal, { from: summoner })
+        await moveForwardPeriods(1)
+        await moloch.submitVote(lastProposal, yes, { from: summoner })
+        await moveForwardPeriods(deploymentConfig.VOTING_DURATON_IN_PERIODS)
+        await moveForwardPeriods(deploymentConfig.GRACE_DURATON_IN_PERIODS)
+        await moloch.processProposal(lastProposal, { from: summoner })
+      }
+
+      /*
+      for (let i = 0; i < MAX_TOKEN_COUNT; i++) {
+        const approvedToken = await moloch.approvedTokens(i)
+        assert.equal(approvedToken, tokens[i].address)
+      }
+      */
+
+      await moloch.submitProposal(
+        applicant1,
+        1, // shares requested
+        0, // loot requested
+        0, // tribute offered
+        tokenAlpha.address, // tribute token
+        0, // payment requested
+        tokenAlpha.address, // payment token
+        'all hail moloch', // details
+        { from: applicant1 }
+      )
+      lastProposal = proposalCount++
+
+      await moloch.sponsorProposal(lastProposal, { from: summoner })
+      await moveForwardPeriods(1)
+      await moloch.submitVote(lastProposal, yes, { from: summoner })
+      await moveForwardPeriods(deploymentConfig.VOTING_DURATON_IN_PERIODS)
+      await moveForwardPeriods(deploymentConfig.GRACE_DURATON_IN_PERIODS)
+      await moloch.processProposal(lastProposal, { from: summoner })
+
+      for (let i = 0; i < MAX_TOKEN_COUNT; i++) {
+        const token = tokens[i]
+        await verifyInternalBalances({
+          moloch,
+          token: token,
+          userBalances: {
+            [GUILD]: 2,
+            [applicant1]: 0,
+          }
+        })
+      }
+
+      const ragequitTx = await moloch.ragequit(1, 0, { from: applicant1 })
+
+      for (let i = 0; i < MAX_TOKEN_COUNT; i++) {
+        const token = tokens[i]
+        await verifyInternalBalances({
+          moloch,
+          token: token,
+          userBalances: {
+            [GUILD]: 1,
+            [applicant1]: 1,
+          }
+        })
+      }
+
+      const gasUsed = ragequitTx.receipt.gasUsed
+      console.log('Gas used in ragequit :', ragequitTx.receipt.gasUsed)
+
+      assert.isAtMost(gasUsed, MAX_GAS)
     })
   })
 })
